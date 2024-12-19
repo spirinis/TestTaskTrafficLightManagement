@@ -18,6 +18,9 @@ class TrafficLight:
         self.__message_queue = []
         self.__state = constants.RED  # Начальное состояние
         self.__working_group = working_group
+        self.emergency = False
+        self.not_broken = True
+        self.__last_activity_time = time.time()
 
     @property
     def id(self) -> int | str:
@@ -59,22 +62,34 @@ class TrafficLight:
     def working_group(self):
         return self.__working_group
 
+    @property
+    def last_activity_time(self):
+        return self.__last_activity_time
+
+    @last_activity_time.setter
+    def last_activity_time(self, value: float):
+        self.__last_activity_time = value
+
     def message_queue_get(self) -> dict:
         return self.__message_queue.pop(0)
 
     def send_message_to_all(self, message: dict, to_all: bool = True, is_informative: bool = True) -> None:
-        if is_informative:
-            print(f'{self.id} отправил {message}')
-        for traffic_light_id in (self.busy_ids if to_all else self.busy_ids[:4]):
-            if traffic_light_id != self.id:
-                Communication.send(traffic_light_id, message)
+        if self.not_broken or (message['do'] == 'change_state' and message['id'] == message['leader']):
+            self.last_activity_time = time.time()
+            if is_informative:
+                print(f'{self.id} отправил {message}')
+            for traffic_light_id in (self.busy_ids if to_all else self.busy_ids[:4]):
+                if traffic_light_id != self.id:
+                    Communication.send(traffic_light_id, message)
+        else:
+            print(f'{self.id} НЕ ОТПРАВИЛ {message}')
 
     def do(self):
         pass
 
 
 class PedestrianTrafficLight(TrafficLight):
-    _POSSIBLE_STATES = (constants.RED, constants.GREEN)
+    _POSSIBLE_STATES = (constants.RED, constants.GREEN, constants.OFF)
 
     def __init__(self, id_: int | str, working_group: tuple) -> None:
         super().__init__(id_, working_group)
@@ -84,7 +99,7 @@ class PedestrianTrafficLight(TrafficLight):
 
     def do(self):
         message = self.message_queue_get()
-        if 'do' in message:
+        if ('do' in message) and not self.emergency:
             id_ = message.get('id')
             do_what = message.get('do')
             if do_what == 'change_state':
@@ -100,6 +115,9 @@ class PedestrianTrafficLight(TrafficLight):
                             self.change_state(constants.RED, leader_id)
                     else:
                         self.change_state(constants.RED, leader_id)
+            elif do_what == 'emergency':
+                self.state = constants.OFF
+                self.emergency = True
 
     def change_state(self, state: str, leader: int | str) -> None:
         is_informative = False
@@ -118,13 +136,14 @@ class CarTrafficLight(TrafficLight):
         self.previous_state = constants.GREEN
         self.yellow_thread = None
         self.expectant_thread = None
+        self.activity_thread = None
         self.__monitored_group_queue_size = 0
         self.__other_monitored_group_queues = {}
         self.__is_leader = False
         self.__leader_exists = False
-        self.__answers_count = 0
         self.__take_the_lead_time = 0
         self.__previous_leader = ''
+        self.__answers = set()
 
     def __repr__(self) -> str:
         return f'CarTrafficLight({self.id}, {self.state})'
@@ -134,6 +153,7 @@ class CarTrafficLight(TrafficLight):
         return self.__other_monitored_group_queues
 
     def monitored_queue_size_add(self, value: int) -> None:
+        self.last_activity_time = time.time()
         self.monitored_queue_size += value
         self.monitored_group_queue_size_add(value)
         message = {'id': self.id, 'do': 'change_monitored_queue', 'change': value}
@@ -146,24 +166,25 @@ class CarTrafficLight(TrafficLight):
                     or (time.time() - self.__take_the_lead_time > constants.MAX_LEADER_TIME)):
                 self.release_the_lead()
         if self.__monitored_group_queue_size < 0:
-            self.emergency_shutdown()
+            self.emergency_shutdown('Программная ошибка')
             raise RuntimeError(f'Светофор {self.id}: отрицательная очередь')
 
     def switch_state(self):
         def timer_yellow():
             self.leader_change_state(constants.YELLOW)
             time.sleep(constants.YELLOW_DURATION)
-            if self.previous_state == constants.RED:
-                self.leader_change_state(constants.GREEN)
-            elif self.previous_state == constants.GREEN:
-                self.leader_change_state(constants.RED)
+            if not self.emergency:
+                if self.previous_state == constants.RED:
+                    self.leader_change_state(constants.GREEN)
+                elif self.previous_state == constants.GREEN:
+                    self.leader_change_state(constants.RED)
         self.yellow_thread = threading.Thread(target=timer_yellow, daemon=True)
         self.yellow_thread.start()
 
     def leader_change_state(self, state: str) -> None:
+        self.__answers = set()
         self.change_state(state, leader=self.id)
-        # self.__answers_count = 0
-        # self.waiting_for_answers()
+        self.waiting_for_answers()
 
     def change_state(self, state: str, leader: int | str) -> None:
         is_informative = False
@@ -182,11 +203,10 @@ class CarTrafficLight(TrafficLight):
     def waiting_for_answers(self):
         def expectant():
             time.sleep(constants.MAX_RESPONSE_TIME)
-            if self.__answers_count == 12:
-                self.__answers_count = 0
-            else:
-                print(f'waiting_for_answers {self.id} {self.__is_leader} ответов {self.__answers_count}')
-                self.emergency_shutdown()
+            if (not self.emergency) and (len(self.__answers) != 11):
+                print(f'[ERROR] Светофор {self.id} лидер - {self.__is_leader}'
+                      f' получил только {len(self.__answers)} ответов')
+                self.emergency_shutdown('Светофор не отозвался на изменение цвета лидера')
         self.expectant_thread = threading.Thread(target=expectant, daemon=True)
         self.expectant_thread.start()
 
@@ -203,18 +223,41 @@ class CarTrafficLight(TrafficLight):
         message = {'id': self.id, 'do': 'leader_released'}
         self.send_message_to_all(message, to_all=False)
 
-    def emergency_shutdown(self):
-        pass
-        # raise RuntimeError('emergency_shutdown')
+    def at_emergency(self):
+        self.state = constants.YELLOW
+        self.emergency = True
+
+    def emergency_shutdown(self, why: str):
+        if not self.emergency:
+            message = {'id': self.id, 'do': 'emergency', 'why': why}
+            self.send_message_to_all(message)
+            self.at_emergency()
 
     def do(self):
+        def worker_activity():
+            time.sleep(constants.MAX_NO_ACTIVITY_TIME)
+            # с времени последнего внешнего сообщения или отправки сообщения прошло больше указанного времени
+            # и очереди не пусты
+            if ((time.time() - self.last_activity_time > constants.MAX_NO_ACTIVITY_TIME)
+                    and (bool(sum(self.other_monitored_group_queues.values(), self.__monitored_group_queue_size)))):
+                self.emergency_shutdown('Нет сообщений заданное время')
+
         message = self.message_queue_get()
-        if 'do' in message:
+
+        if ('do' in message) and not self.emergency:
+            self.last_activity_time = time.time()
+            if (not self.__is_leader) and message.get('do') != 'emergency':
+                # if self.activity_thread is not None:
+                #     self.activity_thread.stop()
+                self.activity_thread = threading.Thread(target=worker_activity, daemon=True)
+                self.activity_thread.start()
             id_ = message.get('id')
+            self.__answers.add(id_)
             do_what = message.get('do')
             if do_what == 'change_state':
                 leader_id = message.get('leader')
                 if leader_id == id_:
+                    self.waiting_for_answers()
                     leader_state = message.get('state')
                     if leader_state == constants.RED:
                         self.change_state(constants.RED, leader_id)
@@ -222,8 +265,6 @@ class CarTrafficLight(TrafficLight):
                         self.change_state(constants.RED, leader_id)
                     elif leader_state == constants.YELLOW:
                         self.change_state(constants.RED, leader_id)
-                else:
-                    self.__answers_count += 1
 
             elif do_what == 'change_monitored_queue':
                 change = message.get('change')
@@ -236,17 +277,20 @@ class CarTrafficLight(TrafficLight):
             elif do_what == 'leader_released':
                 self.__previous_leader = id_
                 self.__leader_exists = False
-                sorted_other__group_queues = sorted(self.__other_monitored_group_queues.items(),
-                                                    key=lambda item: item[1], reverse=True)
+                sorted_other_group_queues = sorted(self.__other_monitored_group_queues.items(),
+                                                   key=lambda item: item[1], reverse=True)
                 # если групповая очередь больше остальных
                 # или больше остальных очередь предыдущего лидера, но собственная групповая очередь вторая по размеру
-                if (all(self.__monitored_group_queue_size > queue for queue
-                    in self.__other_monitored_group_queues.values())
-                        or ((self.__previous_leader in sorted_other__group_queues[0][0])
-                            and (self.__monitored_group_queue_size > sorted_other__group_queues[1][1]))):
+                if ((self.monitored_queue_size > sorted_other_group_queues[0][1])
+                        or ((self.__previous_leader in sorted_other_group_queues[0][0])
+                            and (self.__monitored_group_queue_size > sorted_other_group_queues[1][1]))
+                        or (self.monitored_queue_size == sorted_other_group_queues[0][1]
+                            and constants.CAR_TRAFFIC_LIGHT_PRIORITY[self.id] < constants.CAR_TRAFFIC_LIGHT_PRIORITY[
+                                sorted_other_group_queues[0][0][0]])):
                     self.take_the_lead()
                     self.__leader_exists = True
 
             elif do_what == 'leader_taken':
                 self.__leader_exists = True
-
+            elif do_what == 'emergency':
+                self.at_emergency()

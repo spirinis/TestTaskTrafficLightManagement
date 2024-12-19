@@ -1,4 +1,5 @@
 import time
+import threading
 from sources import traffic_lights
 from sources.communication import Communication
 import sources.constants as constants
@@ -6,19 +7,13 @@ import sources.constants as constants
 if __name__ == '__main__':
     list_car_traffic_lights = []
     list_pedestrian_traffic_lights = []
-    car_traffic_light_ids = ('с Запада', 'с Севера', 'с Востока', 'с Юга',)
-    # вложенность для распределения по рабочим группам
-    pedestrian_traffic_light_ids = (('с Севера на Запад', 'с Севера на Восток'),
-                                    ('с Востока на Север', 'с Востока на Юг'),
-                                    ('с Юга на Запад', 'с Юга на Восток'),
-                                    ('с Запада на Север', 'с Запада на Юг'),)
     # создание объектов 4 автомобильных светофоров
     # север сверху
-    for ids_i in range(len(car_traffic_light_ids)):
-        id_ = car_traffic_light_ids[ids_i]
+    for ids_i in range(len(constants.CAR_TRAFFIC_LIGHT_IDS)):
+        id_ = constants.CAR_TRAFFIC_LIGHT_IDS[ids_i]
         # указание объектам светофоров адресов своих рабочих групп
         # рабочая группа изменяет состояние одновременно, имеет общую очередь
-        working_group = tuple(pedestrian_traffic_light_ids[ids_i])
+        working_group = tuple(constants.PEDESTRIAN_TRAFFIC_LIGHT_IDS[ids_i])
 
         traffic_light = traffic_lights.CarTrafficLight(id_, working_group)
 
@@ -27,12 +22,12 @@ if __name__ == '__main__':
         list_car_traffic_lights.append(traffic_light)
 
     # создание объектов 8 пешеходных светофоров
-    for group_ids_i in range(len(pedestrian_traffic_light_ids)):
-        for ids_i in range(len(pedestrian_traffic_light_ids[group_ids_i])):
-            id_ = pedestrian_traffic_light_ids[group_ids_i][ids_i]
+    for group_ids_i in range(len(constants.PEDESTRIAN_TRAFFIC_LIGHT_IDS)):
+        for ids_i in range(len(constants.PEDESTRIAN_TRAFFIC_LIGHT_IDS[group_ids_i])):
+            id_ = constants.PEDESTRIAN_TRAFFIC_LIGHT_IDS[group_ids_i][ids_i]
             # указание объектам светофоров адресов своих рабочих групп
-            working_group = (car_traffic_light_ids[group_ids_i],
-                             *set(pedestrian_traffic_light_ids[group_ids_i]) - {id_})
+            working_group = (constants.CAR_TRAFFIC_LIGHT_IDS[group_ids_i],
+                             *set(constants.PEDESTRIAN_TRAFFIC_LIGHT_IDS[group_ids_i]) - {id_})
 
             traffic_light = traffic_lights.PedestrianTrafficLight(id_, working_group)
 
@@ -43,12 +38,12 @@ if __name__ == '__main__':
 
     # указание объектам светофоров адресов других рабочих групп
     for car_traffic_light in list_car_traffic_lights:
-        for i_id in range(len(car_traffic_light_ids)):
-            if car_traffic_light_ids[i_id] != car_traffic_light.id:
+        for i_id in range(len(constants.CAR_TRAFFIC_LIGHT_IDS)):
+            if constants.CAR_TRAFFIC_LIGHT_IDS[i_id] != car_traffic_light.id:
                 group_ids = ()
-                group_ids += (car_traffic_light_ids[i_id], *pedestrian_traffic_light_ids[i_id])
+                group_ids += (constants.CAR_TRAFFIC_LIGHT_IDS[i_id], *constants.PEDESTRIAN_TRAFFIC_LIGHT_IDS[i_id])
                 car_traffic_light.other_monitored_group_queues.update({group_ids: 0})
-    del car_traffic_light, i_id, group_ids, car_traffic_light_ids, pedestrian_traffic_light_ids
+    del car_traffic_light, i_id, group_ids, constants.CAR_TRAFFIC_LIGHT_IDS, constants.PEDESTRIAN_TRAFFIC_LIGHT_IDS
 
     ctl_w, ctl_n, ctl_e, ctl_s, = list_car_traffic_lights
     ptl_nw, ptl_ne, ptl_en, ptl_es, *args = list_pedestrian_traffic_lights
@@ -62,6 +57,17 @@ if __name__ == '__main__':
         else:
             return True
 
+    def destroy_the_traffic_light(wait):
+        """Сломает восточный автомобильный светофор через wait секунд"""
+        def destroyer():
+            time.sleep(wait)
+            global ctl_e
+            # Это что? Бэкдор? Если переопределить id для нарушения связи или присвоить класс предок у меня
+            # защиты от дурака ругаются
+            ctl_e.not_broken = False
+        destroyer_thread = threading.Thread(target=destroyer, daemon=True)
+        destroyer_thread.start()
+
     # ситуация с тремя разными очередями с участием пешеходов
     # ctl_w.monitored_queue_size_add(3)
     # ctl_e.monitored_queue_size_add(6)
@@ -74,6 +80,9 @@ if __name__ == '__main__':
     ctl_w.monitored_queue_size_add(15)
     ctl_e.monitored_queue_size_add(4)
 
+    # сломать светофор "с Востока"
+    destroy_the_traffic_light(wait=10)
+
     # отправка пакета об окончании работы лидера, за которым последует установление нового лидера и запуск системы
     print(f"{'НАЧАЛО СИМУЛЯЦИИ':=^100}")
     ctl_n.release_the_lead()
@@ -84,7 +93,8 @@ if __name__ == '__main__':
         for traffic_light in list_all_traffic_lights:
             queues_emptiness.append(simulation_of_queue_movement(traffic_light))
         time.sleep(constants.CROSSING_TIME)
-        # остановка симуляции, если все очереди пусты
-        if bool(queues_emptiness) and all(queues_emptiness):
+        # остановка симуляции, если все очереди пусты, или если светофоры перешли в аварийный режим
+        if ((bool(queues_emptiness) and all(queues_emptiness))
+                or any((traffic_light.emergency for traffic_light in list_car_traffic_lights))):
             break
     print(f"{'КОНЕЦ СИМУЛЯЦИИ':=^100}")
