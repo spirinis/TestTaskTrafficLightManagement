@@ -1,10 +1,12 @@
 import time
 import threading
+from typing import Dict, Tuple
 from sources.communication import Communication
 import sources.constants as constants
 
 
 class TrafficLight:
+    """Родительский класс для классов светофоров"""
     busy_ids = []
     _POSSIBLE_STATES = ()
 
@@ -19,7 +21,7 @@ class TrafficLight:
         self.__state = constants.RED  # Начальное состояние
         self.__working_group = working_group
         self.emergency = False
-        self.not_broken = True
+        self.not_broken = True  # отключит для светофора возможность отправлять пакеты
         self.__last_activity_time = time.time()
 
     @property
@@ -31,19 +33,21 @@ class TrafficLight:
         return self.__monitored_queue_size
 
     @monitored_queue_size.setter
-    def monitored_queue_size(self, value):
+    def monitored_queue_size(self, value: int) -> None:
         self.__monitored_queue_size = value
 
     def monitored_queue_size_add(self, value: int) -> None:
+        """Моделирует работу камеры, отправляет данные об изменении очереди светофора."""
         self.__monitored_queue_size += value
         message = {'id': self.id, 'do': 'change_monitored_queue', 'change': value}
         self.send_message_to_all(message, to_all=False)
 
     @property
-    def message_queue(self):
+    def message_queue(self) -> list[dict]:
         return self.__message_queue
 
     def message_queue_add(self, message: dict) -> None:
+        """Функция получения сообщений по связи между устройствами, запускает итерацию обработки сообщения"""
         self.__message_queue.append(message)
         self.do()
 
@@ -59,21 +63,23 @@ class TrafficLight:
             raise ValueError(f'\'{value}\' не может быть состоянием')
 
     @property
-    def working_group(self):
+    def working_group(self) -> tuple:
         return self.__working_group
 
     @property
-    def last_activity_time(self):
+    def last_activity_time(self) -> float:
         return self.__last_activity_time
 
     @last_activity_time.setter
-    def last_activity_time(self, value: float):
+    def last_activity_time(self, value: float) -> None:
         self.__last_activity_time = value
 
     def message_queue_get(self) -> dict:
+        """Заберёт из очереди сообщений самое старое сообщение"""
         return self.__message_queue.pop(0)
 
     def send_message_to_all(self, message: dict, to_all: bool = True, is_informative: bool = True) -> None:
+        """Отправит другим устройствам широковещательный пакет(всем или только ведущим)"""
         if self.not_broken or (message['do'] == 'change_state' and message['id'] == message['leader']):
             self.last_activity_time = time.time()
             if is_informative:
@@ -89,6 +95,7 @@ class TrafficLight:
 
 
 class PedestrianTrafficLight(TrafficLight):
+    """Ведомый пешеходный светофор"""
     _POSSIBLE_STATES = (constants.RED, constants.GREEN, constants.OFF)
 
     def __init__(self, id_: int | str, working_group: tuple) -> None:
@@ -97,7 +104,8 @@ class PedestrianTrafficLight(TrafficLight):
     def __repr__(self) -> str:
         return f'PedestrianTrafficLight({self.id}, {self.state})'
 
-    def do(self):
+    def do(self) -> None:
+        """Функция, обрабатывающая все получаемые сообщения"""
         message = self.message_queue_get()
         if ('do' in message) and not self.emergency:
             id_ = message.get('id')
@@ -120,6 +128,7 @@ class PedestrianTrafficLight(TrafficLight):
                 self.emergency = True
 
     def change_state(self, state: str, leader: int | str) -> None:
+        """Устанавливает конкретный сигнал светофора, отправляет сообщение-ответ"""
         is_informative = False
         if self.state != state:
             self.state = state
@@ -129,6 +138,7 @@ class PedestrianTrafficLight(TrafficLight):
 
 
 class CarTrafficLight(TrafficLight):
+    """Ведущий автомобильный светофор"""
     _POSSIBLE_STATES = (constants.RED, constants.YELLOW, constants.GREEN)
 
     def __init__(self, id_: int | str, working_group: tuple) -> None:
@@ -149,10 +159,11 @@ class CarTrafficLight(TrafficLight):
         return f'CarTrafficLight({self.id}, {self.state})'
 
     @property
-    def other_monitored_group_queues(self):
+    def other_monitored_group_queues(self) -> Dict[Tuple[int | str], int]:
         return self.__other_monitored_group_queues
 
     def monitored_queue_size_add(self, value: int) -> None:
+        """Моделирует работу камеры, отправляет данные об изменении очереди светофора."""
         self.last_activity_time = time.time()
         self.monitored_queue_size += value
         self.monitored_group_queue_size_add(value)
@@ -160,6 +171,7 @@ class CarTrafficLight(TrafficLight):
         self.send_message_to_all(message, to_all=False)
 
     def monitored_group_queue_size_add(self, value: int) -> None:
+        """Записывает полученные данные о других групповых очередях."""
         self.__monitored_group_queue_size += value
         if self.__is_leader:
             if ((self.__monitored_group_queue_size == 0)
@@ -169,8 +181,10 @@ class CarTrafficLight(TrafficLight):
             self.emergency_shutdown('Программная ошибка')
             raise RuntimeError(f'Светофор {self.id}: отрицательная очередь')
 
-    def switch_state(self):
-        def timer_yellow():
+    def switch_state(self) -> None:
+        """Запускает алгоритм открытия и закрытия светофора, используя для этого отдельный поток"""
+        def timer_yellow() -> None:
+            """Поток открытия или закрытия светофора"""
             self.leader_change_state(constants.YELLOW)
             time.sleep(constants.YELLOW_DURATION)
             if not self.emergency:
@@ -182,11 +196,13 @@ class CarTrafficLight(TrafficLight):
         self.yellow_thread.start()
 
     def leader_change_state(self, state: str) -> None:
+        """Устанавливает конкретный сигнал светофора-лидера, запускает поток отслеживания ответов"""
         self.__answers = set()
         self.change_state(state, leader=self.id)
         self.waiting_for_answers()
 
     def change_state(self, state: str, leader: int | str) -> None:
+        """Устанавливает конкретный сигнал светофора, отправляет сообщение-ответ"""
         is_informative = False
         if self.state != state:
             if state == constants.GREEN:
@@ -200,8 +216,10 @@ class CarTrafficLight(TrafficLight):
         message = {'id': self.id, 'leader': leader, 'do': 'change_state', 'state': self.state}
         self.send_message_to_all(message, is_informative=is_informative)
 
-    def waiting_for_answers(self):
-        def expectant():
+    def waiting_for_answers(self) -> None:
+        """Запускает отдельный поток для контроля реакции светофоров на изменение цвета лидера"""
+        def expectant() -> None:
+            """Поток ожидания ответов"""
             time.sleep(constants.MAX_RESPONSE_TIME)
             if (not self.emergency) and (len(self.__answers) != 11):
                 print(f'[ERROR] Светофор {self.id} лидер - {self.__is_leader}'
@@ -210,7 +228,8 @@ class CarTrafficLight(TrafficLight):
         self.expectant_thread = threading.Thread(target=expectant, daemon=True)
         self.expectant_thread.start()
 
-    def take_the_lead(self):
+    def take_the_lead(self) -> None:
+        """Функция взятия лидерства среди ведущих"""
         if not self.__leader_exists:
             self.__is_leader = True
             self.__take_the_lead_time = time.time()
@@ -218,22 +237,26 @@ class CarTrafficLight(TrafficLight):
             self.send_message_to_all(message, to_all=False)
             self.switch_state()
 
-    def release_the_lead(self):
+    def release_the_lead(self) -> None:
+        """Функция отдачи лидерства"""
         self.__is_leader = False
         message = {'id': self.id, 'do': 'leader_released'}
         self.send_message_to_all(message, to_all=False)
 
-    def at_emergency(self):
+    def at_emergency(self) -> None:
+        """Действия ведущих при аварии"""
         self.state = constants.YELLOW
         self.emergency = True
 
-    def emergency_shutdown(self, why: str):
+    def emergency_shutdown(self, why: str) -> None:
+        """Функция объявления аварийной ситуации"""
         if not self.emergency:
             message = {'id': self.id, 'do': 'emergency', 'why': why}
             self.send_message_to_all(message)
             self.at_emergency()
 
-    def do(self):
+    def do(self) -> None:
+        """Функция, обрабатывающая все получаемые сообщения"""
         def worker_activity():
             time.sleep(constants.MAX_NO_ACTIVITY_TIME)
             # с времени последнего внешнего сообщения или отправки сообщения прошло больше указанного времени
@@ -247,13 +270,12 @@ class CarTrafficLight(TrafficLight):
         if ('do' in message) and not self.emergency:
             self.last_activity_time = time.time()
             if (not self.__is_leader) and message.get('do') != 'emergency':
-                # if self.activity_thread is not None:
-                #     self.activity_thread.stop()
                 self.activity_thread = threading.Thread(target=worker_activity, daemon=True)
                 self.activity_thread.start()
             id_ = message.get('id')
             self.__answers.add(id_)
             do_what = message.get('do')
+
             if do_what == 'change_state':
                 leader_id = message.get('leader')
                 if leader_id == id_:
@@ -274,13 +296,15 @@ class CarTrafficLight(TrafficLight):
                     for key in self.__other_monitored_group_queues.keys():
                         if id_ in key:
                             self.__other_monitored_group_queues[key] += change
+
             elif do_what == 'leader_released':
                 self.__previous_leader = id_
                 self.__leader_exists = False
                 sorted_other_group_queues = sorted(self.__other_monitored_group_queues.items(),
                                                    key=lambda item: item[1], reverse=True)
                 # если групповая очередь больше остальных
-                # или больше остальных очередь предыдущего лидера, но собственная групповая очередь вторая по размеру
+                # или больше остальных очередь предыдущего лидера и собственная групповая очередь вторая по размеру
+                # или собственная групповая очередь одна из равных наибольших, но с наибольшим приоритетом
                 if ((self.monitored_queue_size > sorted_other_group_queues[0][1])
                         or ((self.__previous_leader in sorted_other_group_queues[0][0])
                             and (self.__monitored_group_queue_size > sorted_other_group_queues[1][1]))
@@ -292,5 +316,6 @@ class CarTrafficLight(TrafficLight):
 
             elif do_what == 'leader_taken':
                 self.__leader_exists = True
+
             elif do_what == 'emergency':
                 self.at_emergency()
